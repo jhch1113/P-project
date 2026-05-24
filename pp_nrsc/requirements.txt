@@ -1,0 +1,12 @@
+fastapi>=0.95
+uvicorn>=0.22
+tensorflow>=2.11
+scipy
+numpy
+pandas
+pydantic
+opencv-python
+pyyaml
+requests
+websockets
+pytest

@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.orchestrator
+    environment:
+      SERVICE_MODE: orchestrator
+      VIDEO_FEED_URL: http://camera:8001/video_feed
+    ports:
+      - "8000:8000"
+    depends_on:
+      - camera
+      - eeg
+
+  camera:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.camera
+    environment:
+      SERVICE_MODE: camera
+      AGGREGATOR_URL: http://orchestrator:8000
+      PUBLISH_INTERVAL_SEC: "0.5"
+    ports:
+      - "8001:8001"
+    privileged: true
+    volumes:
+      - /dev:/dev
+
+  eeg:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.eeg
+    network_mode: "host"
+    environment:
+      SERVICE_MODE: eeg
+      EEG_MODE: ${EEG_MODE:-muse2}
+      AGGREGATOR_URL: http://localhost:8000
+      PUBLISH_INTERVAL_SEC: "1.0"
+      MUSE_MODEL_PATH: ${MUSE_MODEL_PATH:-/models/MUSE_activity_model.keras}
+    volumes:
+      - ./models:/models:ro

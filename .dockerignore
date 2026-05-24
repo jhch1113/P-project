@@ -1,0 +1,10 @@
+.git/
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+third_party/
+docs/
+scripts/

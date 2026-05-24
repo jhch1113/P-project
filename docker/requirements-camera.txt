@@ -1,0 +1,7 @@
+fastapi>=0.95
+uvicorn>=0.22
+numpy
+opencv-python
+mediapipe==0.10.18
+protobuf<5
+pyrealsense2==2.57.7.10387
