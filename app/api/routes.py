@@ -76,12 +76,26 @@ def create_router(
     # ------------------------------------------------------------------
     @router.get("/", response_class=HTMLResponse, summary="통합 졸음 감지 대시보드")
     def index():
-        return HTMLResponse(content=build_dashboard_html(video_feed_url=video_feed_url))
+        return HTMLResponse(content=build_dashboard_html(video_feed_url="/video_feed"))
 
     @router.get("/video_feed", summary="MJPEG 실시간 IR 영상 스트림")
     def video_feed():
         if video_feed_url and video_feed_url != "/video_feed":
-            return RedirectResponse(video_feed_url)
+            import urllib.request
+            def _proxy_stream():
+                try:
+                    with urllib.request.urlopen(video_feed_url, timeout=5.0) as response:
+                        while True:
+                            chunk = response.read(4096)
+                            if not chunk:
+                                break
+                            yield chunk
+                except Exception as e:
+                    logger.error(f"비디오 스트림 프록시 오류: {e}")
+            return StreamingResponse(
+                _proxy_stream(),
+                media_type="multipart/x-mixed-replace; boundary=frame",
+            )
         return StreamingResponse(
             _generate_mjpeg(),
             media_type="multipart/x-mixed-replace; boundary=frame",

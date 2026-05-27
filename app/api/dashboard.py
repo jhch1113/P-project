@@ -254,6 +254,8 @@ def build_dashboard_html(video_feed_url: str = "/video_feed") -> str:
     </div>
   </div>
   <script>
+    const $ = id => document.getElementById(id);
+
     function colorForScore(s) {
       if (s >= 0.65) return 'var(--red)';
       if (s >= 0.45) return 'var(--red-mild)';
