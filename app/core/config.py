@@ -5,6 +5,7 @@ core/config.py
 하드코딩된 매직 넘버를 완전히 제거하여 재현성과 실험 용이성을 보장한다.
 """
 
+import os
 from dataclasses import dataclass
 
 
@@ -18,6 +19,7 @@ class CameraConfig:
     fps: int = 30
     stream_index: int = 1       # IR 채널 인덱스 (1 = 좌적외선)
     jpeg_quality: int = 85      # 스트리밍 JPEG 인코딩 품질
+    use_webcam: bool = os.environ.get("USE_WEBCAM", "0") == "1"
 
 
 @dataclass(frozen=True)

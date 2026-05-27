@@ -91,18 +91,27 @@ class VisionProcessingLoop:
     # ------------------------------------------------------------------
     def _run(self) -> None:
         pipeline: Optional[rs.pipeline] = None
+        cap: Optional[cv2.VideoCapture] = None
         try:
-            pipeline, profile = self._start_pipeline()
             detector = DriverMonitorCV(self._drw_cfg, self._cam_cfg)
 
-            # 실제 카메라 intrinsics 추출 및 적용
-            intrinsics = (
-                profile
-                .get_stream(rs.stream.infrared, self._cam_cfg.stream_index)
-                .as_video_stream_profile()
-                .get_intrinsics()
-            )
-            detector.head_pose.update_from_realsense(intrinsics)
+            if self._cam_cfg.use_webcam:
+                logger.info("일반 웹캠(cv2.VideoCapture) 모드로 시작합니다.")
+                cap = cv2.VideoCapture(0)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._cam_cfg.width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._cam_cfg.height)
+                cap.set(cv2.CAP_PROP_FPS, self._cam_cfg.fps)
+            else:
+                pipeline, profile = self._start_pipeline()
+                
+                # 실제 카메라 intrinsics 추출 및 적용
+                intrinsics = (
+                    profile
+                    .get_stream(rs.stream.infrared, self._cam_cfg.stream_index)
+                    .as_video_stream_profile()
+                    .get_intrinsics()
+                )
+                detector.head_pose.update_from_realsense(intrinsics)
 
             # 드로잉 유틸리티 (매 루프 재생성 방지)
             mp_drawing = mp.solutions.drawing_utils
@@ -116,27 +125,39 @@ class VisionProcessingLoop:
                 if self._state.check_and_clear_reset_calibration():
                     detector.reset_calibration()
 
-                frames = pipeline.wait_for_frames(timeout_ms=2000)
-                ir_frame = frames.get_infrared_frame(self._cam_cfg.stream_index)
-                if not ir_frame:
-                    logger.warning("IR 프레임 누락 — 건너뜀.")
-                    continue
+                if self._cam_cfg.use_webcam:
+                    assert cap is not None
+                    ret, frame = cap.read()
+                    if not ret:
+                        logger.warning("웹캠 프레임 누락 — 건너뜀.")
+                        cv2.waitKey(10)
+                        continue
+                    
+                    # 웹캠은 가시광(RGB/BGR)이므로 바로 크기 맞추고 BGR -> RGB 변환
+                    frame = cv2.resize(frame, (self._cam_cfg.width, self._cam_cfg.height))
+                    ir_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                else:
+                    frames = pipeline.wait_for_frames(timeout_ms=2000)
+                    ir_frame = frames.get_infrared_frame(self._cam_cfg.stream_index)
+                    if not ir_frame:
+                        logger.warning("IR 프레임 누락 — 건너뜀.")
+                        continue
 
-                img = np.asanyarray(ir_frame.get_data())
-                assert img.shape == (self._cam_cfg.height, self._cam_cfg.width), (
-                    f"예상치 못한 프레임 형상: {img.shape}"
-                )
+                    img = np.asanyarray(ir_frame.get_data())
+                    assert img.shape == (self._cam_cfg.height, self._cam_cfg.width), (
+                        f"예상치 못한 프레임 형상: {img.shape}"
+                    )
 
-                # [Medical & CV Precision] IR 영상은 가시광 대비 동적 범위가 좁아 MediaPipe의 인식률을 급감시킵니다.
-                # 조직(Tissue) 윤곽 검출 시 널리 쓰이는 CLAHE를 적용하여 국소 명암비를 극대화합니다.
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                img_enhanced = clahe.apply(img)
+                    # [Medical & CV Precision] IR 영상은 가시광 대비 동적 범위가 좁아 MediaPipe의 인식률을 급감시킵니다.
+                    # 조직(Tissue) 윤곽 검출 시 널리 쓰이는 CLAHE를 적용하여 국소 명암비를 극대화합니다.
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                    img_enhanced = clahe.apply(img)
 
-                # GRAY(1ch) → RGB(3ch): MediaPipe는 RGB 3채널 입력 요구
-                ir_rgb = cv2.cvtColor(img_enhanced, cv2.COLOR_GRAY2RGB)
-                assert ir_rgb.dtype == np.uint8 and ir_rgb.shape[2] == 3, (
-                    f"ir_rgb 타입/형상 오류: dtype={ir_rgb.dtype}, shape={ir_rgb.shape}"
-                )
+                    # GRAY(1ch) → RGB(3ch): MediaPipe는 RGB 3채널 입력 요구
+                    ir_rgb = cv2.cvtColor(img_enhanced, cv2.COLOR_GRAY2RGB)
+                    assert ir_rgb.dtype == np.uint8 and ir_rgb.shape[2] == 3, (
+                        f"ir_rgb 타입/형상 오류: dtype={ir_rgb.dtype}, shape={ir_rgb.shape}"
+                    )
 
                 snapshot, face_landmarks = detector.process_frame(ir_rgb)
 
@@ -161,3 +182,6 @@ class VisionProcessingLoop:
             if pipeline is not None:
                 pipeline.stop()
                 logger.info("RealSense 파이프라인 정상 종료.")
+            if cap is not None:
+                cap.release()
+                logger.info("웹캠 정상 종료.")
