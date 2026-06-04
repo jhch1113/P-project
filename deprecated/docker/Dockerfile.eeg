@@ -1,0 +1,51 @@
+# Keras 3.14.0(더미 모델 저장 버전)이 Python >= 3.11을 요구하므로 3.11 사용.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# ── 1단계: liblsl 빌드 의존성 + 런타임 라이브러리 설치 ──────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake \
+    make \
+    g++ \
+    git \
+    libssl-dev \
+    libgomp1 \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    # Bluetooth / D-Bus (muselsl stream이 BlueZ D-Bus를 사용)
+    bluez \
+    dbus \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 2단계: liblsl 소스 빌드 (컨테이너 GLIBC에 맞게 재컴파일) ─────────────────
+COPY third_party/liblsl /tmp/liblsl
+RUN rm -rf /tmp/liblsl/build && \
+    cmake -S /tmp/liblsl -B /tmp/liblsl/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLSL_BUILD_STATIC=OFF && \
+    cmake --build /tmp/liblsl/build --config Release -j$(nproc) && \
+    cp /tmp/liblsl/build/liblsl.so* /usr/local/lib/ && \
+    ldconfig && \
+    rm -rf /tmp/liblsl
+
+ENV PYLSL_LIB=/usr/local/lib/liblsl.so
+
+# ── 3단계: Python 의존성 설치 ────────────────────────────────────────────────
+WORKDIR /app
+
+COPY docker/requirements-eeg.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# ── 4단계: 애플리케이션 소스 복사 ────────────────────────────────────────────
+COPY . /app
+
+COPY docker/entrypoint-eeg.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 8002
+ENTRYPOINT ["/entrypoint.sh"]

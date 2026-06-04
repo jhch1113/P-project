@@ -1,0 +1,22 @@
+# GPU(EEG) 컨테이너 Python 의존성.
+# TensorFlow는 NVIDIA Jetson 전용 GPU 휠을 Dockerfile에서 별도 설치하므로
+# 여기에는 포함하지 않는다(일반 PyPI TF는 CPU 전용이라 GPU 미사용).
+fastapi>=0.95
+uvicorn>=0.22
+python-multipart
+# L4T 베이스는 Python 3.10이며 keras 3.13+ 는 Python>=3.11을 요구하므로
+# 3.10에서 가능한 최신 keras 3.12.2를 사용한다(quantization_config 지원: keras>=3.5).
+# 모델은 3.13.2로 저장됐으나 3.12.2로 역직렬화 가능함을 빌드 후 검증한다.
+# (TF 2.16.1+nv 휠이 keras 3.12.2를 동반 설치하므로 버전 일치)
+keras==3.12.2
+# TF 2.16.x(nv24.08)는 NumPy 2.0을 지원하지 않으므로 1.x로 고정.
+numpy<2.0
+scipy
+pandas
+pydantic
+opencv-python
+pyyaml
+requests
+websockets
+pylsl
+muselsl

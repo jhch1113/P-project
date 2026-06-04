@@ -1,3 +1,7 @@
+# Jetson Orin + NVIDIA GPU EEG (기본 배포)
+# x86/CPU: docker compose -f docker-compose.cpu.yml --env-file .env up --build -d
+# 가이드: docs/DEPLOYMENT.md  |  환경변수 템플릿: .env.example
+
 version: "3.9"
 
 services:
@@ -8,8 +12,12 @@ services:
     environment:
       SERVICE_MODE: orchestrator
       VIDEO_FEED_URL: http://camera:8001/video_feed
+      # 졸음 단계 임계값 (final_score 0–1). 깨어 있을 때 P90~P95를 CAUTION에 맞춘다.
+      FUSION_THRESHOLD_CAUTION: ${FUSION_THRESHOLD_CAUTION:-0.32}
+      FUSION_THRESHOLD_WARNING: ${FUSION_THRESHOLD_WARNING:-0.52}
+      FUSION_THRESHOLD_DROWSY: ${FUSION_THRESHOLD_DROWSY:-0.72}
     ports:
-      - "8000:8000"
+      - "${ORCHESTRATOR_PORT:-8000}:8000"
     depends_on:
       - camera
       - eeg
@@ -21,9 +29,10 @@ services:
     environment:
       SERVICE_MODE: camera
       AGGREGATOR_URL: http://orchestrator:8000
-      PUBLISH_INTERVAL_SEC: "0.5"
+      PUBLISH_INTERVAL_SEC: ${PUBLISH_INTERVAL_SEC:-0.5}
+      CAM_FPS: ${CAM_FPS:-15}
     ports:
-      - "8001:8001"
+      - "${CAMERA_PORT:-8001}:8001"
     privileged: true
     volumes:
       - /dev:/dev
@@ -31,13 +40,45 @@ services:
   eeg:
     build:
       context: .
-      dockerfile: docker/Dockerfile.eeg
+      dockerfile: docker/Dockerfile.eeg.gpu
+    # Jetson GPU(CUDA)로 EEG 모델 추론을 수행하기 위한 NVIDIA 컨테이너 런타임.
+    runtime: nvidia
     network_mode: "host"
+    # Bluetooth 접근을 위한 권한 설정
+    # - privileged: BlueZ D-Bus 및 HCI 소켓 접근
+    # - /var/run/dbus: 호스트 D-Bus 소켓 공유 (BlueZ 데몬이 호스트에서 실행)
+    privileged: true
+    # [FD Leak Fix] bleak BLE 재연결이 FD를 누수시켜 1024 한계 도달 시
+    # "Too many open files"로 마비되는 문제를 방지하기 위해 하드/소프트 한계 상향.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - ${MODELS_DIR:-./models}:/models:ro
+      - /var/run/dbus:/var/run/dbus
+      - /run/dbus:/run/dbus
     environment:
       SERVICE_MODE: eeg
       EEG_MODE: ${EEG_MODE:-muse2}
       AGGREGATOR_URL: http://localhost:8000
-      PUBLISH_INTERVAL_SEC: "1.0"
+      PUBLISH_INTERVAL_SEC: ${EEG_PUBLISH_INTERVAL_SEC:-1.0}
+      # 호스트 models/ → /models 마운트 권장 (.env.example 참고)
       MUSE_MODEL_PATH: ${MUSE_MODEL_PATH:-/models/MUSE_activity_model.keras}
-    volumes:
-      - ./models:/models:ro
+      # 반드시 .env에 본인 Muse2 MAC 지정 (예: MUSE_ADDRESS=00:55:DA:XX:XX:XX)
+      MUSE_ADDRESS: ${MUSE_ADDRESS:?Set MUSE_ADDRESS in .env — see .env.example}
+      DBUS_SYSTEM_BUS_ADDRESS: unix:path=/var/run/dbus/system_bus_socket
+      # ── GPU(CUDA) 설정 ──────────────────────────────────────────────
+      # nvidia 런타임에 GPU/드라이버 능력 노출.
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      # Jetson은 GPU/CPU가 통합 메모리를 공유하므로, TF가 전체 메모리를
+      # 선점하지 않도록 점진 할당(allow growth)을 강제한다.
+      TF_FORCE_GPU_ALLOW_GROWTH: "true"
+      TF_CPP_MIN_LOG_LEVEL: "1"
+      # AI 모델 깨어 있음 baseline (자동 30초 캘리브 전 폴백). 재연결 시 baseline 재수집.
+      EEG_MODEL_AWAKE_BASELINE: ${EEG_MODEL_AWAKE_BASELINE:-0.50}
+      EEG_MODEL_BASELINE_CALIB_SEC: ${EEG_MODEL_BASELINE_CALIB_SEC:-30}
+      EEG_LSL_STALE_TIMEOUT_SEC: ${EEG_LSL_STALE_TIMEOUT_SEC:-5.0}
+      EEG_LSL_PROBE_TIMEOUT_SEC: ${EEG_LSL_PROBE_TIMEOUT_SEC:-4.0}
+      EEG_LSL_RESOLVE_RETRY_SEC: ${EEG_LSL_RESOLVE_RETRY_SEC:-3.0}

@@ -1,6 +1,10 @@
 fastapi>=0.95
 uvicorn>=0.22
+python-multipart
 tensorflow==2.21.0
+# dummy_model.keras가 Keras 3.14.0으로 저장되어 있어 동일 버전으로 고정해야
+# quantization_config 등 신규 직렬화 키를 정상 역직렬화할 수 있다.
+keras==3.14.0
 scipy
 numpy
 pandas
@@ -9,3 +13,5 @@ opencv-python
 pyyaml
 requests
 websockets
+pylsl
+muselsl

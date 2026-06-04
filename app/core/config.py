@@ -1,8 +1,15 @@
 """
 core/config.py
 ==============
-시스템 전체의 불변 설정값을 dataclass로 관리.
-하드코딩된 매직 넘버를 완전히 제거하여 재현성과 실험 용이성을 보장한다.
+실시간 졸음 파이프라인의 하이퍼파라미터 단일 진입점.
+
+- FusionConfig     : 융합 가중치, 단계 threshold, 모델 awake baseline
+- DrowsinessConfig : 카메라 EAR/MAR/Pitch/PERCLOS
+- EEGConfig        : Muse DSP·필터·특징 주기
+- CameraConfig     : 캡처 해상도/FPS
+
+환경변수·필드 설명 표: docs/HYPERPARAMETERS.md
+점수 산출(정규화·합산) 로직: app/api/fusion.py
 """
 
 import os
@@ -14,11 +21,15 @@ from dataclasses import dataclass
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class CameraConfig:
-    width: int = 640
-    height: int = 480
-    fps: int = 30
+    width: int = int(os.environ.get("CAM_WIDTH", "640"))
+    height: int = int(os.environ.get("CAM_HEIGHT", "480"))
+    # 캡처 FPS. CPU 바운드 비전 파이프라인(MediaPipe)이 30fps를 따라가지
+    # 못하면 RealSense 큐에 프레임이 누적되어 지연이 계속 커진다. 따라서
+    # 처리 능력에 맞춘 보수적 기본값(15)을 사용하고, 환경변수로 조정 가능하다.
+    # (실시간 지연 제거의 핵심은 아래 vision_loop의 '최신 프레임 drain' 로직이다.)
+    fps: int = int(os.environ.get("CAM_FPS", "15"))
     stream_index: int = 1       # IR 채널 인덱스 (1 = 좌적외선)
-    jpeg_quality: int = 85      # 스트리밍 JPEG 인코딩 품질
+    jpeg_quality: int = int(os.environ.get("CAM_JPEG_QUALITY", "80"))  # 스트리밍 JPEG 인코딩 품질
     use_webcam: bool = os.environ.get("USE_WEBCAM", "0") == "1"
 
 
@@ -26,8 +37,11 @@ class CameraConfig:
 class DrowsinessConfig:
     # ── 캘리브레이션 ──────────────────────────────────────────────────────────
     calibration_duration: float = 5.0   # 초
-    ear_threshold_factor: float = 0.80  # mean * factor (하한 보조 기준)
-    ear_threshold_std_k: float = 1.5    # mean - k*σ  (주 통계 기준)
+    # 눈 감김: smoothed_ear < threshold. factor는 '뜬 눈 EAR 대비 비율'이므로
+    # 낮을수록(0.55~0.65) 실제 감은 눈만 잡고 PERCLOS 오검출이 줄어든다.
+    # (구 0.80+max() 조합은 임계값이 뜬 눈보다 높아져 PERCLOS가 상시 포화됨)
+    ear_threshold_factor: float = 0.62  # threshold ≈ mean_open × factor
+    ear_threshold_std_k: float = 2.0    # mean - k×σ (통계 보조, min()으로 병합)
     ear_threshold_min: float = 0.15     # 절대 하한 (비현실적 낮은 값 방지)
     ear_threshold_max: float = 0.35     # 절대 상한 (비현실적 높은 값 방지)
 
@@ -84,6 +98,17 @@ class EEGConfig:
     nperseg: int = 256              # 세그먼트 길이 (samples)
     noverlap: int = 128             # 오버랩 (samples)
 
+    # ── 전처리(필터) 파라미터 ────────────────────────────────────────────────
+    # [Critical] 원시 Muse2 신호에는 DC 오프셋·저주파 드리프트(발한/전극 분극)와
+    # 60Hz 전원 노이즈, EMG(근전도)가 섞여 있다. 필터 없이 PSD를 구하면 저주파
+    # 누설이 Theta(4–8Hz) 대역을 부풀려 relative_theta가 비정상적으로 커진다.
+    # 따라서 detrend → 대역통과 → 노치 순으로 반드시 전처리한다.
+    bandpass_low: float = 1.0       # 고역 통과 차단주파수 (Hz) — DC/드리프트 제거
+    bandpass_high: float = 40.0     # 저역 통과 차단주파수 (Hz) — 고주파 EMG 억제
+    notch_freq: float = 60.0        # 전원 노이즈 노치 (대한민국 60Hz)
+    notch_quality: float = 30.0     # 노치 Q 인자 (높을수록 좁은 대역 제거)
+    filter_order: int = 4           # Butterworth 차수 (zero-phase filtfilt 사용)
+
     # 프론탈 채널 인덱스 (AF7=1, AF8=2)
     frontal_channels: tuple = (1, 2)
 
@@ -126,10 +151,28 @@ class FusionConfig:
     rel_theta_weight: float = 0.40
     blink_rate_weight: float = 0.10
 
-    # 졸음 판정 임계값 (최종 점수 기준, 0–1)
-    threshold_caution: float = 0.25
-    threshold_warning: float = 0.45
-    threshold_drowsy: float = 0.65
+    # 졸음 판정 임계값 (최종 점수 0–1). 환경변수로 덮어쓸 수 있다.
+    # 권장: 깨어 있는 상태에서 final_score 분포의 P90~P95를 CAUTION으로 잡고,
+    # 실제 졸음 유도 시험에서 P50~P70을 WARNING으로 검증한다.
+    threshold_caution: float = float(
+        os.environ.get("FUSION_THRESHOLD_CAUTION", "0.32")
+    )
+    threshold_warning: float = float(
+        os.environ.get("FUSION_THRESHOLD_WARNING", "0.52")
+    )
+    threshold_drowsy: float = float(
+        os.environ.get("FUSION_THRESHOLD_DROWSY", "0.72")
+    )
+
+    # AI 모델 P(졸음)의 '깨어 있음' 기준선. 자동 캘리브레이션 전 폴백(실측 ~0.50–0.55).
+    # effective = (prob - baseline) / (1 - baseline) 로 개인 편향을 제거한다.
+    model_awake_baseline_default: float = float(
+        os.environ.get("EEG_MODEL_AWAKE_BASELINE", "0.50")
+    )
+    # 자동 기준선 수집 시간(초). 이 구간의 모델 출력 중앙값을 baseline으로 고정.
+    model_baseline_calib_sec: float = float(
+        os.environ.get("EEG_MODEL_BASELINE_CALIB_SEC", "30")
+    )
 
     # 카메라 서브-점수 정규화 기준값 (fusion 엔진에서 사용)
     pitch_threshold: float = 25.0
@@ -142,3 +185,17 @@ class FusionConfig:
     # 정상 하품 빈도 (회/분)
     normal_blink_rate: float = 15.0
     danger_blink_rate: float = 40.0
+
+
+def adjust_model_drowsy_prob(raw: float, baseline: float) -> float:
+    """
+    AI 모델 P(졸음)에서 개인·세션별 '깨어 있음' 오프셋을 제거한다.
+
+    effective = clip((raw - baseline) / (1 - baseline), 0, 1)
+    baseline≈0.5이고 raw≈0.55이면 effective≈0.10 수준으로 내려간다.
+    """
+    raw_f = max(0.0, min(1.0, float(raw)))
+    b = max(0.0, min(0.95, float(baseline)))
+    if b <= 1e-6:
+        return raw_f
+    return max(0.0, min(1.0, (raw_f - b) / (1.0 - b + 1e-6)))

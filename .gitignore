@@ -18,8 +18,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Models and large files (uncomment if you want to exclude them)
-# models/*.pt
-# models/*.pth
-# models/*.h5
-# models/*.onnx
+# ML weights (Git LFS or Releases — docs/GITHUB.md)
+models/
+*.keras
+*.h5
+*.pt
+*.pth
+*.onnx
+
+# Large training CSV in deprecated/
+deprecated/**/*.csv

@@ -1,0 +1,49 @@
+# =============================================================================
+# EEG 컨테이너 (CPU / x86·amd64·일반 Linux)
+# -----------------------------------------------------------------------------
+# Jetson 전용 L4T 이미지 대신 python:3.11-slim + PyPI TensorFlow(CPU).
+# Muse2 BLE·LSL은 host network + D-Bus 마운트가 필요합니다.
+# =============================================================================
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake \
+    make \
+    g++ \
+    git \
+    libssl-dev \
+    libgomp1 \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    bluez \
+    dbus \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY third_party/liblsl /tmp/liblsl
+RUN rm -rf /tmp/liblsl/build && \
+    cmake -S /tmp/liblsl -B /tmp/liblsl/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLSL_BUILD_STATIC=OFF && \
+    cmake --build /tmp/liblsl/build --config Release -j$(nproc) && \
+    cp /tmp/liblsl/build/liblsl.so* /usr/local/lib/ && \
+    ldconfig && \
+    rm -rf /tmp/liblsl
+
+ENV PYLSL_LIB=/usr/local/lib/liblsl.so
+
+WORKDIR /app
+COPY docker/requirements-eeg.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+COPY . /app
+COPY docker/entrypoint-eeg.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 8002
+ENTRYPOINT ["/entrypoint.sh"]

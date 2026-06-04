@@ -10,11 +10,15 @@ api/fusion.py
   3. 향후 확장: ML 기반 후처리(예: XGBoost, SVM 분류기) 플러그인 가능하도록
      FusionResult에 raw 점수를 보존한다.
 
-졸음 판정 기준 (FusionConfig.threshold_* 조정 가능):
-  NORMAL  : score < 0.25
-  CAUTION : 0.25 ≤ score < 0.45
-  WARNING : 0.45 ≤ score < 0.65
-  DROWSY  : score ≥ 0.65
+졸음 판정 기준 (FusionConfig.threshold_* · 환경변수 FUSION_THRESHOLD_*):
+  NORMAL  : score < threshold_caution   (기본 0.32)
+  CAUTION : caution ≤ score < warning   (기본 0.32–0.52)
+  WARNING : warning ≤ score < drowsy    (기본 0.52–0.72)
+  DROWSY  : score ≥ threshold_drowsy    (기본 0.72)
+
+  튜닝 권장: 깨어 있는 5–10분 세션에서 final_score P90~P95 → CAUTION,
+  실제 졸음 유도 시험 P50 → WARNING. AI 모델 편향은 EEG_MODEL_AWAKE_BASELINE
+  또는 시작 후 자동 baseline(EEG_MODEL_BASELINE_CALIB_SEC)으로 보정.
 """
 
 import logging
@@ -73,6 +77,10 @@ class EEGScore:
     rel_theta: float    # 상대 theta 파워 기반
     blink_rate: float   # 눈 깜빡임 빈도 기반
     total: float        # 가중 합산 최종 점수 (0–1)
+    # AI 모델 P(졸음). 사용 시 total을 이 값으로 대체하고 수작업 점수는 진단용 보존.
+    model_prob: Optional[float] = None       # 원시 P(졸음)
+    model_prob_adj: Optional[float] = None   # baseline 보정 후 (융합에 사용)
+    source: str = "dsp"  # "model" | "dsp"
 
 
 @dataclass
@@ -109,6 +117,17 @@ class FusionResult:
                 "rel_theta": round(self.eeg_score.rel_theta, 4),
                 "blink_rate": round(self.eeg_score.blink_rate, 4),
                 "total": round(self.eeg_score.total, 4),
+                "source": self.eeg_score.source,
+                "model_prob": (
+                    round(self.eeg_score.model_prob, 4)
+                    if self.eeg_score.model_prob is not None
+                    else None
+                ),
+                "model_prob_adj": (
+                    round(self.eeg_score.model_prob_adj, 4)
+                    if self.eeg_score.model_prob_adj is not None
+                    else None
+                ),
             }
         else:
             result["eeg_score"] = None
@@ -131,8 +150,13 @@ class DrowsinessFusion:
     def __init__(self, cfg: FusionConfig) -> None:
         self._cfg = cfg
         logger.info(
-            f"DrowsinessFusion 초기화: "
-            f"camera_weight={cfg.camera_weight}, eeg_weight={cfg.eeg_weight}"
+            "DrowsinessFusion 초기화: cam_w=%.2f eeg_w=%.2f | "
+            "thresholds caution=%.2f warning=%.2f drowsy=%.2f",
+            cfg.camera_weight,
+            cfg.eeg_weight,
+            cfg.threshold_caution,
+            cfg.threshold_warning,
+            cfg.threshold_drowsy,
         )
 
     # ------------------------------------------------------------------
@@ -158,6 +182,15 @@ class DrowsinessFusion:
 
         if eeg_available:
             eeg_score = self._compute_eeg_score(eeg)
+            # AI 모델 추론이 유효하면, EEG 졸음 판정을 '모델 확률'이 주도한다.
+            # (수작업 DSP 서브-점수 alpha_beta/rel_theta/blink는 진단용으로 보존.)
+            if getattr(eeg, "model_available", False):
+                model_raw = float(np.clip(eeg.model_drowsy_prob, 0.0, 1.0))
+                model_adj = float(np.clip(eeg.model_drowsy_prob_adj, 0.0, 1.0))
+                eeg_score.model_prob = model_raw
+                eeg_score.model_prob_adj = model_adj
+                eeg_score.total = model_adj
+                eeg_score.source = "model"
             final_score = (
                 self._cfg.camera_weight * cam_score.total
                 + self._cfg.eeg_weight * eeg_score.total

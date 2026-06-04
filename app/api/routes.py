@@ -131,10 +131,49 @@ def create_router(
             "camera_active": camera_state.is_active(),
         }
 
+    # video_feed_url이 원격(http...)이면 이 인스턴스는 orchestrator이며,
+    # 실제 비전 루프는 별도 camera 컨테이너에서 동작한다. 이 경우 재보정 요청을
+    # camera 서비스로 포워딩해야 실제 캘리브레이션이 초기화된다.
+    _is_orchestrator = bool(video_feed_url) and video_feed_url.startswith("http")
+    _camera_base = (
+        video_feed_url[: -len("/video_feed")]
+        if _is_orchestrator and video_feed_url.endswith("/video_feed")
+        else None
+    )
+
     @router.post("/metrics/camera/reset_calibration", summary="카메라 캘리브레이션 재시작")
     def reset_camera_calibration():
-        """대시보드에서 캘리브레이션 초기화를 요청할 때 호출되는 엔드포인트."""
+        """
+        대시보드에서 캘리브레이션 초기화를 요청할 때 호출되는 엔드포인트.
+
+        - monolith/camera 모드: 로컬 camera_state 이벤트를 set하여 비전 루프가 재보정.
+        - orchestrator 모드: 비전 루프가 camera 컨테이너에 있으므로, 해당 서비스의
+          동일 엔드포인트로 요청을 포워딩한다(로컬 set만으로는 효과 없음).
+        """
+        # 로컬 상태도 set(모놀리식/단독 카메라 모드 대응 및 무해한 폴백)
         camera_state.request_calibration_reset()
+
+        if _camera_base:
+            import urllib.request
+
+            target = f"{_camera_base}/metrics/camera/reset_calibration"
+            try:
+                req = urllib.request.Request(target, data=b"", method="POST")
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    resp.read()
+                logger.info("재보정 요청을 camera 서비스로 포워딩: %s", target)
+                return {
+                    "status": "ok",
+                    "message": "Calibration reset forwarded to camera service",
+                    "forwarded_to": target,
+                }
+            except Exception as e:
+                logger.error("camera 서비스 재보정 포워딩 실패(%s): %s", target, e)
+                return {
+                    "status": "error",
+                    "message": f"Failed to forward to camera service: {e}",
+                }
+
         return {"status": "ok", "message": "Calibration reset requested"}
 
     @router.get("/debug/raw", summary="[진단] 원시 상태 덤프 — 문제 발생 시 확인")
@@ -221,6 +260,10 @@ def create_router(
                 alpha_beta_ratio=_coerce_float(data, "alpha_beta_ratio", 1.0),
                 relative_theta=_coerce_float(data, "relative_theta", 0.0),
                 blink_rate=_coerce_float(data, "blink_rate", 15.0),
+                model_drowsy_prob=_coerce_float(data, "model_drowsy_prob", 0.0),
+                model_drowsy_prob_adj=_coerce_float(data, "model_drowsy_prob_adj", 0.0),
+                model_awake_baseline=_coerce_float(data, "model_awake_baseline", 0.0),
+                model_available=_coerce_bool(data, "model_available", False),
                 is_connected=_coerce_bool(data, "is_connected", False),
                 signal_quality=_coerce_float(data, "signal_quality", 0.0),
                 timestamp=_coerce_float(data, "timestamp", time.time()),

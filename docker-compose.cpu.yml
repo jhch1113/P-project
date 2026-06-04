@@ -1,0 +1,67 @@
+# x86/amd64 또는 Jetson 이외 Linux — EEG는 CPU TensorFlow 이미지 사용
+# 사용: docker compose -f docker-compose.cpu.yml --env-file .env up --build -d
+#
+# Jetson GPU 배포는 기본 docker-compose.yml 을 사용하십시오.
+
+version: "3.9"
+
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.orchestrator
+    environment:
+      SERVICE_MODE: orchestrator
+      VIDEO_FEED_URL: http://camera:8001/video_feed
+      FUSION_THRESHOLD_CAUTION: ${FUSION_THRESHOLD_CAUTION:-0.32}
+      FUSION_THRESHOLD_WARNING: ${FUSION_THRESHOLD_WARNING:-0.52}
+      FUSION_THRESHOLD_DROWSY: ${FUSION_THRESHOLD_DROWSY:-0.72}
+    ports:
+      - "${ORCHESTRATOR_PORT:-8000}:8000"
+    depends_on:
+      - camera
+      - eeg
+
+  camera:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.camera
+    environment:
+      SERVICE_MODE: camera
+      AGGREGATOR_URL: http://orchestrator:8000
+      PUBLISH_INTERVAL_SEC: ${PUBLISH_INTERVAL_SEC:-0.5}
+      CAM_FPS: ${CAM_FPS:-15}
+    ports:
+      - "${CAMERA_PORT:-8001}:8001"
+    privileged: true
+    volumes:
+      - /dev:/dev
+
+  eeg:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.eeg.cpu
+    network_mode: "host"
+    privileged: true
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - ${MODELS_DIR:-./models}:/models:ro
+      - /var/run/dbus:/var/run/dbus
+      - /run/dbus:/run/dbus
+    environment:
+      SERVICE_MODE: eeg
+      EEG_MODE: ${EEG_MODE:-muse2}
+      AGGREGATOR_URL: http://localhost:${ORCHESTRATOR_PORT:-8000}
+      PUBLISH_INTERVAL_SEC: ${EEG_PUBLISH_INTERVAL_SEC:-1.0}
+      MUSE_MODEL_PATH: ${MUSE_MODEL_PATH:-/models/MUSE_activity_model.keras}
+      MUSE_ADDRESS: ${MUSE_ADDRESS:-}
+      DBUS_SYSTEM_BUS_ADDRESS: unix:path=/var/run/dbus/system_bus_socket
+      TF_CPP_MIN_LOG_LEVEL: "1"
+      EEG_MODEL_AWAKE_BASELINE: ${EEG_MODEL_AWAKE_BASELINE:-0.50}
+      EEG_MODEL_BASELINE_CALIB_SEC: ${EEG_MODEL_BASELINE_CALIB_SEC:-30}
+      EEG_LSL_STALE_TIMEOUT_SEC: ${EEG_LSL_STALE_TIMEOUT_SEC:-5.0}
+      EEG_LSL_PROBE_TIMEOUT_SEC: ${EEG_LSL_PROBE_TIMEOUT_SEC:-4.0}
+      EEG_LSL_RESOLVE_RETRY_SEC: ${EEG_LSL_RESOLVE_RETRY_SEC:-3.0}

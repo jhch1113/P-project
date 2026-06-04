@@ -61,6 +61,12 @@ class EEGMetrics:
     # 눈 깜빡임 (EOG 아티팩트 기반 추정)
     blink_rate: float = 15.0        # 회/분 (정상 12–20)
 
+    # AI 모델(MUSE_activity_model) 실시간 추론 결과
+    model_drowsy_prob: float = 0.0  # P(졸음) 원시 0–1, AF7/AF8 5초 윈도우 추론
+    model_drowsy_prob_adj: float = 0.0  # baseline 보정 후 0–1 (졸음 융합에 사용)
+    model_awake_baseline: float = 0.0  # 0=미보정, >0이면 자동/수동 기준선 확정
+    model_available: bool = False   # 모델 추론이 유효하게 수행됐는지
+
     # 연결 상태
     is_connected: bool = False
     signal_quality: float = 0.0     # 0.0(불량) – 1.0(양호)
@@ -74,6 +80,10 @@ class EEGMetrics:
             "alpha_beta_ratio": round(self.alpha_beta_ratio, 3),
             "relative_theta": round(self.relative_theta, 3),
             "blink_rate": round(self.blink_rate, 1),
+            "model_drowsy_prob": round(self.model_drowsy_prob, 4),
+            "model_drowsy_prob_adj": round(self.model_drowsy_prob_adj, 4),
+            "model_awake_baseline": round(self.model_awake_baseline, 4),
+            "model_available": self.model_available,
             "is_connected": self.is_connected,
             "signal_quality": round(self.signal_quality, 2),
         }

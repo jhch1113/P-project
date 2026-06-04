@@ -18,6 +18,7 @@ EEG (AF7, AF8) -> 전처리 -> 추론 -> 확률/상태 반환까지만 책임짐
 from __future__ import annotations
 
 import io
+import logging
 import os
 import time
 import uuid
@@ -34,14 +35,12 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from scipy.signal import butter, filtfilt
 
+logger = logging.getLogger(__name__)
+
 try:
-    from .eeg_data_source import create_reader
-    from .drowsiness_scorer import DrowsinessScorer
     from .advanced_preprocessing import AdvancedPreprocessor
     from .advanced_postprocessing import AdvancedPostprocessor
 except ImportError:  # Allow running as a standalone script
-    from eeg_data_source import create_reader
-    from drowsiness_scorer import DrowsinessScorer
     from advanced_preprocessing import AdvancedPreprocessor
     from advanced_postprocessing import AdvancedPostprocessor
 
@@ -192,6 +191,57 @@ def minmax_scale(p: np.ndarray) -> np.ndarray:
 # ============================================================
 _model: Optional[tf.keras.Model] = None
 _model_lock = Lock()
+_keras_compat_patched = False
+
+
+def _ensure_keras_quant_compat() -> None:
+    """
+    keras 3.13+로 저장된 모델은 각 레이어 config에 ``quantization_config`` 키를
+    포함한다(미양자화 모델은 값이 ``None``). 그러나 keras 3.12.x 이하(예: Jetson
+    GPU용 TF 2.16.1 동반 keras 3.12.2)는 이 kwarg를 인식하지 못해 역직렬화가
+    실패한다(``Unrecognized keyword arguments passed to ...``).
+
+    값이 ``None``(=양자화 미적용)인 경우에 한해 레이어 생성 시 해당 kwarg를
+    제거한다. 양자화 적용 모델(값이 dict)은 그대로 두므로 구버전에서는 명시적
+    오류가 나도록 둔다. keras 3.13+에서는 None을 제거해도 결과가 동일하여
+    버전 무관하게 안전하다(idempotent).
+    """
+    global _keras_compat_patched
+    if _keras_compat_patched:
+        return
+    import keras
+
+    _orig_layer_init = keras.layers.Layer.__init__
+
+    def _patched_layer_init(self, *args, **kwargs):
+        # 명시적으로 None인 경우에만 제거(실제 양자화 설정은 보존)
+        if kwargs.get("quantization_config", "__keep__") is None:
+            kwargs.pop("quantization_config", None)
+        _orig_layer_init(self, *args, **kwargs)
+
+    keras.layers.Layer.__init__ = _patched_layer_init
+    _keras_compat_patched = True
+
+
+def _configure_tensorflow_gpu() -> list:
+    """
+    Jetson/서버 GPU에서 TensorFlow가 CUDA 디바이스를 사용하도록 설정한다.
+    TF_FORCE_GPU_ALLOW_GROWTH=true 이면 통합 메모리(Jetson) 선점을 완화한다.
+    """
+    gpus = tf.config.list_physical_devices("GPU")
+    allow_growth = os.environ.get("TF_FORCE_GPU_ALLOW_GROWTH", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if gpus and allow_growth:
+        for gpu in gpus:
+            try:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            except RuntimeError:
+                # 이미 GPU가 초기화된 경우(재호출) — 무시
+                pass
+    return gpus
 
 
 def get_model() -> tf.keras.Model:
@@ -201,10 +251,26 @@ def get_model() -> tf.keras.Model:
             if _model is None:
                 if not os.path.exists(MODEL_PATH):
                     raise RuntimeError(f"모델 파일을 찾을 수 없음: {MODEL_PATH}")
+                gpus = _configure_tensorflow_gpu()
+                logger.info(
+                    "TensorFlow %s | CUDA built=%s | GPU devices=%s | model=%s",
+                    tf.__version__,
+                    tf.test.is_built_with_cuda(),
+                    gpus,
+                    MODEL_PATH,
+                )
+                if not gpus:
+                    logger.warning(
+                        "GPU 미탐지 — EEG 모델 추론이 CPU에서 실행됩니다. "
+                        "Jetson에서는 docker-compose의 runtime:nvidia 및 "
+                        "Dockerfile.eeg.gpu 빌드가 필요합니다."
+                    )
+                _ensure_keras_quant_compat()
                 _model = tf.keras.models.load_model(MODEL_PATH, compile=False, safe_mode=False)
-                # warmup
+                # warmup (첫 predict 시 GPU 커널/JIT 지연 제거)
                 dummy = np.zeros((1, SEQ_LEN, 2), dtype=np.float32)
                 _model.predict(dummy, verbose=0)
+                logger.info("모델 warmup 완료 (입력 shape=%s).", dummy.shape)
     return _model
 
 
@@ -774,6 +840,15 @@ async def ws_live_muse(websocket: WebSocket):
     서버가 Muse LSL에서 직접 EEG를 읽어 추론/점수화한 결과를 브라우저로 푸시.
     """
     await websocket.accept()
+    import sys
+    from pathlib import Path
+
+    _legacy_dir = Path(__file__).resolve().parents[1] / "deprecated" / "pp_nrsc"
+    if _legacy_dir.is_dir() and str(_legacy_dir) not in sys.path:
+        sys.path.insert(0, str(_legacy_dir))
+    from eeg_data_source import create_reader  # type: ignore
+    from drowsiness_scorer import DrowsinessScorer  # type: ignore
+
     reader = create_reader("muse2")
     sess = StreamSession(uuid.uuid4().hex)
     scorer = DrowsinessScorer(

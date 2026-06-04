@@ -1,0 +1,75 @@
+# =============================================================================
+# EEG 컨테이너 (GPU/CUDA 추론판)
+# -----------------------------------------------------------------------------
+# 베이스: NVIDIA L4T JetPack r36.4.0 (Ubuntu 22.04 / Python 3.10 / CUDA 12.6 / cuDNN / TensorRT)
+# TensorFlow: NVIDIA Jetson 전용 GPU 휠(tensorflow 2.16.1+nv24.08, cp310) — Tegra GPU(CUDA) 가속.
+#   ※ 일반 PyPI tensorflow(aarch64)는 CPU 전용이라 GPU를 쓰지 못한다.
+# 실행 시 docker-compose에서 nvidia 런타임을 지정해야 GPU가 노출된다.
+# =============================================================================
+FROM nvcr.io/nvidia/l4t-jetpack:r36.4.0
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# ── 1단계: 빌드/런타임 의존성 + Bluetooth/D-Bus + TF 보조 라이브러리 ──────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-dev \
+    make \
+    g++ \
+    git \
+    libssl-dev \
+    libgomp1 \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    # TF/h5py/scipy 보조 (HDF5/BLAS/LAPACK)
+    libhdf5-dev \
+    libopenblas-dev \
+    liblapack-dev \
+    gfortran \
+    # Bluetooth / D-Bus (muselsl stream이 BlueZ D-Bus를 사용)
+    bluez \
+    dbus \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 2단계: pip 최신화 + CMake 설치 ──────────────────────────────────────────
+# Ubuntu 22.04 apt의 cmake(3.22.1)는 liblsl 요구(>=3.23) 미달이므로 pip 휠로 설치.
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    python3 -m pip install --no-cache-dir "cmake>=3.27"
+
+# ── 3단계: liblsl 소스 빌드 (컨테이너 GLIBC에 맞게 재컴파일) ─────────────────
+COPY third_party/liblsl /tmp/liblsl
+RUN rm -rf /tmp/liblsl/build && \
+    cmake -S /tmp/liblsl -B /tmp/liblsl/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLSL_BUILD_STATIC=OFF && \
+    cmake --build /tmp/liblsl/build --config Release -j$(nproc) && \
+    cp /tmp/liblsl/build/liblsl.so* /usr/local/lib/ && \
+    ldconfig && \
+    rm -rf /tmp/liblsl
+
+ENV PYLSL_LIB=/usr/local/lib/liblsl.so
+
+# ── 4단계: NVIDIA Jetson GPU TensorFlow 휠 설치 (CUDA 가속) ──────────────────
+# JP6.1(v61) 휠은 JP6.2(CUDA 12.x)와 호환된다. 의존성은 PyPI에서 자동 해소.
+RUN python3 -m pip install --no-cache-dir \
+    "https://developer.download.nvidia.com/compute/redist/jp/v61/tensorflow/tensorflow-2.16.1+nv24.08-cp310-cp310-linux_aarch64.whl"
+
+# ── 5단계: 나머지 Python 의존성 설치 ────────────────────────────────────────
+WORKDIR /app
+COPY docker/requirements-eeg-gpu.txt /tmp/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
+
+# ── 6단계: 애플리케이션 소스 복사 ────────────────────────────────────────────
+COPY . /app
+
+COPY docker/entrypoint-eeg.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 8002
+ENTRYPOINT ["/entrypoint.sh"]

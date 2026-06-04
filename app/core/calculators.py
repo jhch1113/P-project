@@ -164,9 +164,11 @@ class HeadPoseEstimator:
         if not success:
             return None, None, None
         rmat, _ = cv2.Rodrigues(rvec)
+        # cv2.RQDecomp3x3의 첫 반환값(angles)은 이미 '도(°)' 단위의 오일러 각이다.
+        # 과거 ×360을 곱하던 로직은 25°를 9000°로 폭증시켜 거짓 HEAD DROP을
+        # 유발했으므로 제거한다. (angles[0]=pitch, [1]=yaw, [2]=roll)
         angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
-        # RQDecomp3x3 반환값은 정규화 값 → ×360으로 도(°) 변환
-        return angles[0] * 360.0, angles[1] * 360.0, angles[2] * 360.0
+        return float(angles[0]), float(angles[1]), float(angles[2])
 
 
 # ---------------------------------------------------------------------------
@@ -176,10 +178,13 @@ class CalibrationManager:
     """
     개인화 EAR 임계값 자동 캘리브레이션 (통계 기반).
 
-    두 가지 기준을 동시에 적용하여 더 보수적인(높은) 값을 선택:
-      1) mean - k * σ      : 개인별 눈 개방 편차를 반영한 주 기준
-      2) mean * factor     : 통계값이 너무 낮을 때의 안전망
-    결과를 [min, max]로 클리핑하여 비현실적 임계값 방지.
+    판정: smoothed_ear < ear_threshold → 눈 감김(PERCLOS 누적).
+
+    두 후보 중 **더 낮은** 값을 선택한다(뜬 눈을 감김으로 오분류하지 않도록):
+      1) mean - k×σ   : 캘리브레이션 분산 반영
+      2) mean × factor: 뜬 눈 EAR의 일정 비율(일반적으로 0.55~0.65)
+    임계값이 mean×0.75를 넘지 않게 상한을 둔다(PERCLOS 포화 방지).
+    결과는 [ear_threshold_min, ear_threshold_max]로 클리핑.
     """
 
     def __init__(self, cfg: DrowsinessConfig) -> None:
@@ -230,14 +235,16 @@ class CalibrationManager:
         mean_ear = float(np.mean(arr_ear))
         std_ear = float(np.std(arr_ear))
         
-        # 두 기준 중 더 높은(보수적) 값 선택 → 과소검출 방지
         threshold_stat = mean_ear - self._cfg.ear_threshold_std_k * std_ear
         threshold_factor = mean_ear * self._cfg.ear_threshold_factor
-        raw_ear = max(threshold_stat, threshold_factor)
+        # 낮은 임계값 → 뜬 눈(ear≈mean)은 감김으로 잡히지 않음 → PERCLOS 정상화
+        raw_ear = min(threshold_stat, threshold_factor)
+        # 안전 상한: 임계값이 뜬 눈 평균의 75%를 넘으면 오검출 위험이 크다
+        raw_ear = min(raw_ear, mean_ear * 0.75)
         self.ear_threshold = float(
             np.clip(raw_ear, self._cfg.ear_threshold_min, self._cfg.ear_threshold_max)
         )
-        
+
         # Pitch 보정 (평균 자세를 0도로 영점 조절하기 위한 기준값)
         if self._pitch_samples:
             arr_pitch = np.array(self._pitch_samples, dtype=np.float32)
@@ -247,8 +254,16 @@ class CalibrationManager:
 
         self.is_done = True
         logger.info(
-            f"캘리브레이션 완료: EAR mean={mean_ear:.4f}, thr={self.ear_threshold:.4f} | "
-            f"Pitch baseline={self.pitch_baseline:.2f}° (n={len(self._ear_samples)})"
+            "캘리브레이션 완료: EAR mean=%.4f std=%.4f | thr=%.4f "
+            "(stat=%.4f factor=%.4f cap=%.4f) | Pitch baseline=%.2f° (n=%d)",
+            mean_ear,
+            std_ear,
+            self.ear_threshold,
+            threshold_stat,
+            threshold_factor,
+            mean_ear * 0.75,
+            self.pitch_baseline,
+            len(self._ear_samples),
         )
 
 
