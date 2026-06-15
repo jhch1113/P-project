@@ -3,10 +3,24 @@
 ```bash
 # 환경이 구축된 현 Jetson Orin Nano에서 다음과 같이 실행
 cd ~/drowsiness_project
-docker compose --env-file .env up --build -d
+docker compose --env-file .env up -d
 
-#실행 후
+# 코드/이미지를 바꾼 뒤 첫 기동
+# docker compose --env-file .env up --build -d
+
+# 실행 후 확인
 docker compose --env-file .env ps
+docker compose --env-file .env logs -f eeg 
+
+# Muse가 안 붙을 때
+# (이미 했으면 생략 가능)
+# bluetoothctl (이미 했으면 생략 가능)
+# trust 00:55:DA:B8:28:A3
+# exit
+docker compose --env-file .env restart eeg
+
+# Muse 없이 카메라만
+# .env에 EEG_MODE=stub으로 설정 -> Muse 없이도 up 가능
 ```
 로 실행
 
