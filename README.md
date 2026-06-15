@@ -22,7 +22,13 @@ docker compose --env-file .env restart eeg
 # Muse 없이 카메라만
 # .env에 EEG_MODE=stub으로 설정 -> Muse 없이도 up 가능
 ```
-로 실행
+
+```bash
+# 다음과 같은 순서로 종료
+cd ~/drowsiness_project
+docker compose --env-file .env down
+sudo shutdown -h now
+```
 
 ## 1. 프로젝트 개요 (Project Overview)
 본 프로젝트는 적외선 카메라(Intel RealSense D435i)를 통한 시각적 특징 추출과 뇌파 측정 장비(Muse2)를 통한 생체 신호 분석을 결합한 다중모달(Multi-modal) 기반의 실시간 졸음 감지 시스템입니다. 연산 부하가 높은 영상 처리 및 신호 분석 로직을 분산 처리하기 위해, Jetson Orin Nano와 같은 엣지 디바이스 컴퓨팅 환경에 최적화된 마이크로서비스(Docker 컨테이너) 아키텍처를 설계 및 구현하였습니다.
